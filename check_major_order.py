@@ -10,15 +10,15 @@ except ImportError:
     TRANSLATOR_AVAILABLE = False
 
 DATA_FILE = "data/helldivers_state.json"
-
-# 替换为当前稳定在线的 API 列表（按优先级尝试）
-API_ENDPOINTS = [
-    "https://api.helldivers2.dev/api/v1/major-orders",
-    "https://api.diveharder.com/v1/major_order"
-]
-
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 SUPER_EARTH_ICON = "https://static.wikia.nocookie.net/helldivers_gamepedia/images/c/c2/Super_Earth.png"
+
+# 当前稳定活跃的社区接口及备用数据源
+API_ENDPOINTS = [
+    "https://api.helldivers2.dev/api/v1/major-orders",
+    "https://api.helldivers2.dev/raw/api/v2/MajorOrders",
+    "https://helldiversstats.com/api/v1/historical-major-orders?limit=1"
+]
 
 def load_state():
     if os.path.exists(DATA_FILE):
@@ -43,7 +43,7 @@ def to_chinese(text):
         try:
             return GoogleTranslator(source='auto', target='zh-CN').translate(text)
         except Exception as e:
-            print(f"[Warn] 翻译失败，保留原文: {e}")
+            print(f"[Warn] 翻译服务失败，保留原文: {e}")
     return text
 
 def format_duration(seconds):
@@ -74,28 +74,37 @@ def send_discord_embed(embed_payload):
     resp.raise_for_status()
 
 def fetch_major_orders():
+    # 官方要求必须包含 X-Super-Client 和 X-Super-Contact 标识
     headers = {
         "Accept-Language": "zh-Hans,zh-CN;q=0.9",
-        "User-Agent": "Helldivers-Discord-Tracker/2.0"
+        "User-Agent": "Helldivers-Discord-Tracker/2.0",
+        "X-Super-Client": "HelldiversDiscordNotifier",
+        "X-Super-Contact": "admin@helldivers-bot.internal"
     }
-    
-    last_exception = None
+
+    last_err = None
     for url in API_ENDPOINTS:
         try:
             print(f"[Info] 正在请求 API: {url} ...")
-            res = requests.get(url, headers=headers, timeout=15)
+            res = requests.get(url, headers=headers, timeout=12)
+            print(f"[Info] API 状态码: {res.status_code}")
+            
             if res.status_code == 200:
                 data = res.json()
-                # 兼容返回单个字典或数组结构
+                # 兼容部分分页结构（如 helldiversstats）
                 if isinstance(data, dict):
+                    if "data" in data and isinstance(data["data"], list):
+                        return data["data"]
                     return [data]
                 return data
+            else:
+                print(f"[Warn] 端点 {url} 返回 HTTP {res.status_code}: {res.text[:120]}")
         except Exception as e:
-            print(f"[Warn] 端点 {url} 连接失败: {e}")
-            last_exception = e
+            print(f"[Warn] 端点 {url} 异常: {e}")
+            last_err = e
             continue
-            
-    raise RuntimeError(f"所有可用 API 端点均不可用，最后错误: {last_exception}")
+
+    raise RuntimeError(f"所有可用 API 端点均不可用，最后异常: {last_err}")
 
 def main():
     state = load_state()
@@ -133,20 +142,25 @@ def main():
 
     # 2. 检测新指令
     if current_order:
-        cid = current_order.get("id")
-        if cid != state.get("last_order_id"):
+        cid = current_order.get("id") or current_order.get("id32") or current_order.get("orderId32")
+        if cid and cid != state.get("last_order_id"):
             setting = current_order.get("setting", {})
-            raw_title = setting.get("overrideTitle") or f"行动 #{cid}"
-            raw_brief = setting.get("overrideBrief") or "前线暂无补充简报，遵从终端既定战术引导。"
+            raw_title = setting.get("overrideTitle") or current_order.get("title") or f"行动 #{cid}"
+            raw_brief = setting.get("overrideBrief") or current_order.get("brief") or "前线暂无补充简报，遵从终端既定战术引导。"
 
             title = to_chinese(raw_title)
             brief = to_chinese(raw_brief)
 
+            # 勋章奖励解析
             reward_data = setting.get("reward", {})
             amount = reward_data.get("amount", 0) if isinstance(reward_data, dict) else 0
+            if not amount:
+                amount = current_order.get("rewardMedals", 0)
+            
             reward_desc = f"🎖️ **{amount}** 战争债券勋章" if amount else "管理式民主的无上荣光"
 
-            expires_in = current_order.get("expiresIn", 0)
+            # 倒计时
+            expires_in = current_order.get("expiresIn") or current_order.get("expiresInLastSeen", 0)
             time_str = format_duration(expires_in)
 
             embed_new = {
