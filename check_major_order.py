@@ -10,8 +10,12 @@ except ImportError:
     TRANSLATOR_AVAILABLE = False
 
 DATA_FILE = "data/helldivers_state.json"
-API_URL = "https://api.helldivers2.dev/raw/api/v2/MajorOrders"
-FALLBACK_API_URL = "https://helldivers-2.fly.dev/api/v1/major-orders"
+
+# 替换为当前稳定在线的 API 列表（按优先级尝试）
+API_ENDPOINTS = [
+    "https://api.helldivers2.dev/api/v1/major-orders",
+    "https://api.diveharder.com/v1/major_order"
+]
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 SUPER_EARTH_ICON = "https://static.wikia.nocookie.net/helldivers_gamepedia/images/c/c2/Super_Earth.png"
@@ -66,24 +70,32 @@ def send_discord_embed(embed_payload):
         "avatar_url": SUPER_EARTH_ICON,
         "embeds": [embed_payload]
     }
-    resp = requests.post(WEBHOOK_URL, json=data)
+    resp = requests.post(WEBHOOK_URL, json=data, timeout=15)
     resp.raise_for_status()
 
 def fetch_major_orders():
     headers = {
         "Accept-Language": "zh-Hans,zh-CN;q=0.9",
-        "User-Agent": "Helldivers-CN-Bot/1.0"
+        "User-Agent": "Helldivers-Discord-Tracker/2.0"
     }
-    try:
-        res = requests.get(API_URL, headers=headers, timeout=12)
-        if res.status_code == 200:
-            return res.json()
-    except Exception as e:
-        print(f"[Warn] 主 API 失败: {e}，尝试备用线路...")
-
-    res = requests.get(FALLBACK_API_URL, timeout=12)
-    res.raise_for_status()
-    return res.json()
+    
+    last_exception = None
+    for url in API_ENDPOINTS:
+        try:
+            print(f"[Info] 正在请求 API: {url} ...")
+            res = requests.get(url, headers=headers, timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                # 兼容返回单个字典或数组结构
+                if isinstance(data, dict):
+                    return [data]
+                return data
+        except Exception as e:
+            print(f"[Warn] 端点 {url} 连接失败: {e}")
+            last_exception = e
+            continue
+            
+    raise RuntimeError(f"所有可用 API 端点均不可用，最后错误: {last_exception}")
 
 def main():
     state = load_state()
@@ -91,7 +103,6 @@ def main():
         orders = fetch_major_orders()
     except Exception as e:
         print(f"[Error] 获取指令失败: {e}")
-        # 如果 API 失败，也要保存空或现有状态，确保文件存在
         save_state(state)
         return
 
@@ -155,7 +166,6 @@ def main():
             state["last_order_id"] = cid
             state["last_order_title"] = title
 
-    # 无论有无新指令，都保存状态，确保该文件一定会被创建
     save_state(state)
 
 if __name__ == "__main__":
