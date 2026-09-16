@@ -3,7 +3,6 @@ import json
 import requests
 from datetime import datetime, timezone
 
-# 尝试导入机翻库作为保底
 try:
     from deep_translator import GoogleTranslator
     TRANSLATOR_AVAILABLE = True
@@ -11,9 +10,7 @@ except ImportError:
     TRANSLATOR_AVAILABLE = False
 
 DATA_FILE = "data/helldivers_state.json"
-# 推荐使用原生支持语言请求头的官方社区 API
 API_URL = "https://api.helldivers2.dev/raw/api/v2/MajorOrders"
-# 备用 API（旧端点）
 FALLBACK_API_URL = "https://helldivers-2.fly.dev/api/v1/major-orders"
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
@@ -34,17 +31,15 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def to_chinese(text):
-    """如果文本是纯英文，使用免凭证引擎自动翻译为简体中文"""
     if not text:
         return ""
-    # 简单检测是否已经包含中文字符
     if any('\u4e00' <= char <= '\u9fff' for char in text):
         return text
     if TRANSLATOR_AVAILABLE:
         try:
             return GoogleTranslator(source='auto', target='zh-CN').translate(text)
         except Exception as e:
-            print(f"[Warn] 翻译服务失败，回退原文: {e}")
+            print(f"[Warn] 翻译失败，保留原文: {e}")
     return text
 
 def format_duration(seconds):
@@ -75,7 +70,6 @@ def send_discord_embed(embed_payload):
     resp.raise_for_status()
 
 def fetch_major_orders():
-    """优先抓取官方多语言接口，备选旧接口"""
     headers = {
         "Accept-Language": "zh-Hans,zh-CN;q=0.9",
         "User-Agent": "Helldivers-CN-Bot/1.0"
@@ -85,9 +79,8 @@ def fetch_major_orders():
         if res.status_code == 200:
             return res.json()
     except Exception as e:
-        print(f"[Warn] 主要 API 请求超时或失败: {e}，尝试备用线路...")
+        print(f"[Warn] 主 API 失败: {e}，尝试备用线路...")
 
-    # 备选接口
     res = requests.get(FALLBACK_API_URL, timeout=12)
     res.raise_for_status()
     return res.json()
@@ -97,7 +90,9 @@ def main():
     try:
         orders = fetch_major_orders()
     except Exception as e:
-        print(f"[Error] 获取指令彻底失败: {e}")
+        print(f"[Error] 获取指令失败: {e}")
+        # 如果 API 失败，也要保存空或现有状态，确保文件存在
+        save_state(state)
         return
 
     current_order = orders[0] if orders else None
@@ -111,7 +106,7 @@ def main():
             embed_finished = {
                 "title": "🔴 【战略通报】重要指令已结束",
                 "description": f"### 战事封盘：{last_order_title}\n\n全体绝地潜兵请注意，该阶段战区统筹已截止。",
-                "color": 0xE74C3C, # 战斗结案/猩红
+                "color": 0xE74C3C,
                 "fields": [
                     {
                         "name": "🎖️ 战况与结算",
@@ -130,27 +125,23 @@ def main():
         cid = current_order.get("id")
         if cid != state.get("last_order_id"):
             setting = current_order.get("setting", {})
-            
             raw_title = setting.get("overrideTitle") or f"行动 #{cid}"
             raw_brief = setting.get("overrideBrief") or "前线暂无补充简报，遵从终端既定战术引导。"
-            
-            # 转为简体中文（如果接口没自带，就翻译）
+
             title = to_chinese(raw_title)
             brief = to_chinese(raw_brief)
 
-            # 勋章奖励解析
             reward_data = setting.get("reward", {})
             amount = reward_data.get("amount", 0) if isinstance(reward_data, dict) else 0
             reward_desc = f"🎖️ **{amount}** 战争债券勋章" if amount else "管理式民主的无上荣光"
 
-            # 倒计时格式化
             expires_in = current_order.get("expiresIn", 0)
             time_str = format_duration(expires_in)
 
             embed_new = {
                 "title": "🟢 【优先警报】接收到新的重要指令",
                 "description": f"### 🛡️ {title}\n\n> {brief}",
-                "color": 0xF1C40F, # 亮黄/金黄
+                "color": 0xF1C40F,
                 "fields": [
                     {"name": "🎯 作战目标", "value": "根据战术地图指引解放或防守指定星系。", "inline": False},
                     {"name": "🎁 作战津贴", "value": reward_desc, "inline": True},
@@ -164,6 +155,7 @@ def main():
             state["last_order_id"] = cid
             state["last_order_title"] = title
 
+    # 无论有无新指令，都保存状态，确保该文件一定会被创建
     save_state(state)
 
 if __name__ == "__main__":
